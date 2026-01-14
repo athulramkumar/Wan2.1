@@ -14,3 +14,7 @@ imageio-ffmpeg
 flash_attn
 gradio>=5.0.0
 numpy>=1.23.5,<2
+
+# Acceleration libraries (require diffusers>=0.32.0)
+cache-dit>=0.1.0  # Activation caching for DiT models
+xfuser>=0.4.1  # Distributed inference with sequence parallelism
