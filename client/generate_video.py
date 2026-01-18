@@ -17,7 +17,9 @@ Requirements:
 import argparse
 import json
 import os
+import platform
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -94,6 +96,39 @@ def print_progress_bar(progress: int, width: int = 40):
     print(f"\r  [{bar}] {progress}%", end='', flush=True)
 
 
+def format_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours}h {mins}m {secs}s"
+
+
+def open_video(video_path: str) -> bool:
+    """Open video with the default system player."""
+    try:
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            subprocess.run(["open", video_path], check=True)
+        elif system == "Windows":
+            os.startfile(video_path)
+        else:  # Linux
+            subprocess.run(["xdg-open", video_path], check=True)
+        
+        return True
+    except Exception as e:
+        print(f"  Could not open video: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate videos using Wan2.1 API",
@@ -140,6 +175,11 @@ Examples:
         "--output-dir", "-o",
         default=".",
         help="Output directory (default: current directory)"
+    )
+    parser.add_argument(
+        "--no-display",
+        action="store_true",
+        help="Don't open video after generation (default: opens video)"
     )
     parser.add_argument(
         "--poll-interval",
@@ -229,9 +269,11 @@ Examples:
             
             # Show additional info
             model_in_use = status.get("model_in_use", "")
+            elapsed = time.time() - start_time
             if model_in_use:
-                elapsed = time.time() - start_time
-                print(f" | {model_in_use} | {elapsed:.0f}s", end='', flush=True)
+                print(f" | {model_in_use} | {format_duration(elapsed)}", end='', flush=True)
+            else:
+                print(f" | {format_duration(elapsed)}", end='', flush=True)
             
             time.sleep(args.poll_interval)
             
@@ -246,7 +288,7 @@ Examples:
     metadata = final_status.get("metadata", {})
     cache_stats = final_status.get("cache_statistics")
     
-    print(f"✓ Generation complete in {generation_time:.1f}s")
+    print(f"✓ Generation complete in {format_duration(generation_time)}")
     
     if cache_stats:
         hit_rate = cache_stats.get("cache_hit_rate", 0) * 100
@@ -302,9 +344,14 @@ Examples:
     print("=" * 60)
     print(f"  Video:    {video_path}")
     print(f"  Metadata: {json_path}")
-    print(f"  Time:     {generation_time:.1f}s")
+    print(f"  Time:     {format_duration(generation_time)} ({generation_time:.1f}s)")
     print("=" * 60)
     print()
+    
+    # Open video if not disabled
+    if not args.no_display:
+        print("🎬 Opening video...")
+        open_video(video_path)
 
 
 if __name__ == "__main__":

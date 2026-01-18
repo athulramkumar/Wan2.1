@@ -67,6 +67,7 @@ options:
   --cache-end           Cache end step (default: 40)
   --cache-interval      Cache interval (default: 3)
   --output-dir, -o      Output directory (default: current directory)
+  --no-display          Don't auto-open video after generation
   --poll-interval       Status poll interval in seconds (default: 5)
   --server              API server URL
 ```
