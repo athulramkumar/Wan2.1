@@ -1,0 +1,14 @@
+# Wan2.1 Video Generation API - Additional Requirements
+# Base Wan2.1 requirements should already be installed
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+
+# HTTP client for testing
+requests>=2.31.0
+
+# CORS support (included in fastapi but listed for clarity)
+python-multipart>=0.0.6
+
