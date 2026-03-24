@@ -304,22 +304,28 @@ class CLIPEvaluator:
 # =============================================================================
 
 def _startup_cmd(role: str, extra_env: str = "") -> str:
-    """Build pod startup command."""
-    base = (
-        f"cd /workspace/wan2.1/Wan2.1 && "
+    """Build pod startup command wrapped in bash -c for RunPod dockerArgs."""
+    # Handle repo: if not cloned, clone it; then checkout branch
+    setup = (
+        "if [ ! -d /workspace/wan2.1/Wan2.1/.git ]; then "
+        "  mkdir -p /workspace/wan2.1 && cd /workspace/wan2.1 && "
+        "  git clone https://github.com/athulramkumar/Wan2.1.git; "
+        "fi && "
+        "cd /workspace/wan2.1/Wan2.1 && "
         f"git fetch origin 2>/dev/null; git checkout {GIT_BRANCH} 2>/dev/null; git pull origin {GIT_BRANCH} 2>/dev/null; "
-        f"pip install fastapi uvicorn requests pydantic -q 2>/dev/null; "
+        "pip install fastapi uvicorn requests pydantic -q 2>/dev/null; "
     )
     if role == "server_both":
-        return base + "python run_server.py --port 8888"
+        cmd = setup + "python run_server.py --port 8888"
     elif role == "coordinator":
-        return base + f"{extra_env} python run_server.py --port 8888 --distributed --mode coordinator"
+        cmd = setup + f"{extra_env} python run_server.py --port 8888 --distributed --mode coordinator"
     elif role == "worker":
-        return base + "python run_worker.py --port 8889"
+        cmd = setup + "python run_worker.py --port 8889"
     elif role == "worker_multigpu":
-        return base + "python run_worker.py --port 8889 --auto-multi-gpu"
+        cmd = setup + "python run_worker.py --port 8889 --auto-multi-gpu"
     else:
         raise ValueError(f"Unknown role: {role}")
+    return f'bash -c "{cmd}"'
 
 
 # =============================================================================
@@ -577,7 +583,7 @@ def main():
             "NVIDIA H100 80GB HBM3", 1, "SECURE",
             _startup_cmd("server_both"),
         )
-        h100_url = rp.wait_for_ready(h100_pod, SERVER_PORT, timeout=600)
+        h100_url = rp.wait_for_ready(h100_pod, SERVER_PORT, timeout=900)
         h100_client = GenerationClient(h100_url)
 
         h100_start = time.time()
@@ -620,7 +626,7 @@ def main():
             "NVIDIA GeForce RTX 4090", 1, "SECURE",
             _startup_cmd("coordinator"),
         )
-        coord_url = rp.wait_for_ready(coord_pod, SERVER_PORT, timeout=600)
+        coord_url = rp.wait_for_ready(coord_pod, SERVER_PORT, timeout=900)
         coord_client = GenerationClient(coord_url)
         coord_start = time.time()
 
@@ -639,7 +645,7 @@ def main():
             gpu_type, gpu_count, cloud_type,
             _startup_cmd(role),
         )
-        worker_url = rp.wait_for_ready(worker_pod, WORKER_PORT, timeout=600)
+        worker_url = rp.wait_for_ready(worker_pod, WORKER_PORT, timeout=900)
 
         # Tell coordinator about this worker
         coord_client.set_worker_url(worker_url)
