@@ -574,7 +574,7 @@ def main():
     else:
         h100_pod = rp.create_pod(
             "wan21-h100-baseline",
-            "NVIDIA H100 80GB HBM3", 1, "ON_DEMAND",
+            "NVIDIA H100 80GB HBM3", 1, "SECURE",
             _startup_cmd("server_both"),
         )
         h100_url = rp.wait_for_ready(h100_pod, SERVER_PORT, timeout=600)
@@ -617,7 +617,7 @@ def main():
         print(f"{'='*65}")
         coord_pod = rp.create_pod(
             "wan21-coordinator",
-            "NVIDIA GeForce RTX 4090", 1, "ON_DEMAND",
+            "NVIDIA GeForce RTX 4090", 1, "SECURE",
             _startup_cmd("coordinator"),
         )
         coord_url = rp.wait_for_ready(coord_pod, SERVER_PORT, timeout=600)
