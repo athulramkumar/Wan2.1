@@ -55,7 +55,7 @@ except ImportError:
 
 RUNPOD_API_URL = "https://api.runpod.io/graphql"
 GIT_BRANCH = "distributed-inference"
-VOLUME_ID = os.environ.get("RUNPOD_VOLUME_ID", "sy8ts7nyu2")  # athul-dev
+VOLUME_ID = os.environ.get("RUNPOD_VOLUME_ID", "")  # Set to "sy8ts7nyu2" for athul-dev, or empty for any datacenter
 DOCKER_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 
 EXPERIMENT_SEED = 42
@@ -120,7 +120,7 @@ class RunPodClient:
             "gpuCount": gpu_count,
             "cloudType": cloud_type,
             "dockerArgs": startup_cmd,
-            "volumeInGb": 0,
+            "volumeInGb": 150,  # Local disk for model weights
             "containerDiskInGb": 20,
             "minVcpuCount": 4,
             "minMemoryInGb": 32,
@@ -128,6 +128,7 @@ class RunPodClient:
         }
         if self.volume_id:
             inp["networkVolumeId"] = self.volume_id
+            inp["volumeInGb"] = 0  # Use network volume instead
 
         data = self._gql(query, {"input": inp})
         pod = data.get("podFindAndDeployOnDemand", {})
@@ -303,18 +304,51 @@ class CLIPEvaluator:
 # Startup command builder
 # =============================================================================
 
-def _startup_cmd(role: str, extra_env: str = "") -> str:
+def _startup_cmd(role: str, extra_env: str = "", use_volume: bool = False) -> str:
     """Build pod startup command wrapped in bash -c for RunPod dockerArgs."""
-    # Handle repo: if not cloned, clone it; then checkout branch
+    # Step 1: Clone repo if needed, checkout branch
     setup = (
         "if [ ! -d /workspace/wan2.1/Wan2.1/.git ]; then "
         "  mkdir -p /workspace/wan2.1 && cd /workspace/wan2.1 && "
-        "  git clone https://github.com/athulramkumar/Wan2.1.git; "
+        "  git clone https://github.com/athulramkumar/Wan2.1.git 2>&1; "
         "fi && "
         "cd /workspace/wan2.1/Wan2.1 && "
         f"git fetch origin 2>/dev/null; git checkout {GIT_BRANCH} 2>/dev/null; git pull origin {GIT_BRANCH} 2>/dev/null; "
-        "pip install fastapi uvicorn requests pydantic -q 2>/dev/null; "
+        "pip install fastapi uvicorn requests pydantic huggingface_hub -q 2>/dev/null; "
     )
+
+    # Step 2: Download model weights if not already present
+    if not use_volume:
+        # Determine which models this role needs
+        if role in ("server_both",):
+            # Need both 14B and 1.3B
+            setup += (
+                "if [ ! -d Wan2.1-T2V-1.3B ]; then "
+                "  echo 'Downloading 1.3B model...' && "
+                "  huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir Wan2.1-T2V-1.3B 2>&1; "
+                "fi && "
+                "if [ ! -d Wan2.1-T2V-14B ]; then "
+                "  echo 'Downloading 14B model...' && "
+                "  huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir Wan2.1-T2V-14B 2>&1; "
+                "fi && "
+            )
+        elif role in ("coordinator",):
+            # Only need 1.3B
+            setup += (
+                "if [ ! -d Wan2.1-T2V-1.3B ]; then "
+                "  echo 'Downloading 1.3B model...' && "
+                "  huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir Wan2.1-T2V-1.3B 2>&1; "
+                "fi && "
+            )
+        elif role in ("worker", "worker_multigpu"):
+            # Only need 14B
+            setup += (
+                "if [ ! -d Wan2.1-T2V-14B ]; then "
+                "  echo 'Downloading 14B model...' && "
+                "  huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir Wan2.1-T2V-14B 2>&1; "
+                "fi && "
+            )
+
     if role == "server_both":
         cmd = setup + "python run_server.py --port 8888"
     elif role == "coordinator":
@@ -482,9 +516,8 @@ def main():
         sys.exit(1)
 
     volume_id = args.volume_id
-    if not volume_id and not args.dry_run:
-        print("ERROR: Set RUNPOD_VOLUME_ID or --volume-id (athul-dev volume)")
-        sys.exit(1)
+    if not volume_id:
+        print("  No volume ID set — pods will download models from HuggingFace (any datacenter)")
 
     output_dir = OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -583,7 +616,7 @@ def main():
             "NVIDIA H100 80GB HBM3", 1, "SECURE",
             _startup_cmd("server_both"),
         )
-        h100_url = rp.wait_for_ready(h100_pod, SERVER_PORT, timeout=900)
+        h100_url = rp.wait_for_ready(h100_pod, SERVER_PORT, timeout=1800)
         h100_client = GenerationClient(h100_url)
 
         h100_start = time.time()
@@ -603,7 +636,7 @@ def main():
     # Create coordinator (RTX4090, stays up for B-E)
     distributed_phases = {
         "B": ("NVIDIA H100 80GB HBM3", 1, "SPOT", "worker"),
-        "C": ("NVIDIA A100 80GB PCIe", 1, "SPOT", "worker"),
+        "C": ("NVIDIA A100-SXM4-80GB", 1, "SECURE", "worker"),
         "D": ("NVIDIA A40", 2, "SPOT", "worker_multigpu"),
     }
 
@@ -626,7 +659,7 @@ def main():
             "NVIDIA GeForce RTX 4090", 1, "SECURE",
             _startup_cmd("coordinator"),
         )
-        coord_url = rp.wait_for_ready(coord_pod, SERVER_PORT, timeout=900)
+        coord_url = rp.wait_for_ready(coord_pod, SERVER_PORT, timeout=1800)
         coord_client = GenerationClient(coord_url)
         coord_start = time.time()
 
@@ -645,7 +678,7 @@ def main():
             gpu_type, gpu_count, cloud_type,
             _startup_cmd(role),
         )
-        worker_url = rp.wait_for_ready(worker_pod, WORKER_PORT, timeout=900)
+        worker_url = rp.wait_for_ready(worker_pod, WORKER_PORT, timeout=1800)
 
         # Tell coordinator about this worker
         coord_client.set_worker_url(worker_url)
