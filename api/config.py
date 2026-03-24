@@ -125,9 +125,82 @@ class Messages:
 
 
 # =============================================================================
+# Distributed Configuration
+# =============================================================================
+
+@dataclass
+class DistributedConfig:
+    """Configuration for distributed hybrid inference."""
+
+    # Toggle distributed mode
+    enabled: bool = False
+
+    # Worker URL (set by spot_manager or manually)
+    worker_url: str = ""
+
+    # Shared volume checkpoint directory
+    checkpoint_dir: str = "/workspace/checkpoints"
+
+    # Timeout: extra seconds beyond expected segment time
+    worker_timeout_margin: float = 30.0
+
+    # Health check interval (seconds)
+    health_check_interval: float = 30.0
+
+    # Consecutive failures before backing off
+    max_consecutive_failures: int = 3
+
+    # Backoff duration after max failures (seconds)
+    backoff_duration: float = 300.0
+
+    # Worker health check timeout (seconds)
+    health_check_timeout: float = 5.0
+
+    # Expected per-step time on 14B (seconds) for timeout estimation
+    expected_step_time_14b: float = 10.0
+
+
+@dataclass
+class SpotConfig:
+    """Configuration for RunPod spot instance auto-management."""
+
+    # RunPod API key (from env)
+    api_key: str = ""
+
+    # GPU configuration
+    gpu_type: str = "NVIDIA H100 80GB HBM3"
+    gpu_count: int = 1
+
+    # RunPod volume
+    volume_id: str = ""
+
+    # Pod template (pre-configured with deps)
+    template_id: str = ""
+
+    # Idle timeout before stopping spot (seconds)
+    idle_timeout: int = 600
+
+    # Max time to wait for spot pod to start (seconds)
+    max_start_wait: int = 180
+
+    # Worker port on spot pod
+    worker_port: int = 8889
+
+
+# =============================================================================
 # Instantiate defaults
 # =============================================================================
 
 DEFAULTS = GenerationDefaults()
 SERVER = ServerConfig()
+DISTRIBUTED = DistributedConfig(
+    enabled=os.environ.get("DISTRIBUTED_MODE", "false").lower() == "true",
+    worker_url=os.environ.get("WORKER_URL", ""),
+    checkpoint_dir=os.environ.get("CHECKPOINT_DIR", "/workspace/checkpoints"),
+)
+SPOT = SpotConfig(
+    api_key=os.environ.get("RUNPOD_API_KEY", ""),
+    volume_id=os.environ.get("RUNPOD_VOLUME_ID", ""),
+    template_id=os.environ.get("RUNPOD_TEMPLATE_ID", ""),
+)
 

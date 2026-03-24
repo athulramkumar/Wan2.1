@@ -155,8 +155,37 @@ Examples:
         default=1,
         help="Number of worker processes (keep at 1 for GPU)"
     )
-    
+
+    parser.add_argument(
+        "--distributed",
+        action="store_true",
+        help="Enable distributed mode (coordinator + remote worker)"
+    )
+
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="both",
+        choices=["both", "coordinator"],
+        help="Model loading mode: 'both' (default) or 'coordinator' (1.3B only)"
+    )
+
+    parser.add_argument(
+        "--worker-url",
+        type=str,
+        default="",
+        help="Remote worker URL (overrides WORKER_URL env var)"
+    )
+
     args = parser.parse_args()
+
+    # Apply distributed settings to environment
+    if args.distributed:
+        os.environ["DISTRIBUTED_MODE"] = "true"
+        if args.mode:
+            os.environ["MODEL_MODE"] = args.mode
+        if args.worker_url:
+            os.environ["WORKER_URL"] = args.worker_url
     
     # Check if something is running on the port
     existing = get_process_on_port(args.port)

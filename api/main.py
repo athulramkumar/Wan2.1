@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import (
     DEFAULTS,
+    DISTRIBUTED,
     VALID_MODELS,
     VALID_FRAME_COUNTS,
     VALID_FPS,
@@ -59,9 +60,10 @@ async def lifespan(app: FastAPI):
     logger.info("STARTING WAN2.1 VIDEO GENERATION API")
     logger.info("=" * 60)
     
-    # Initialize models
-    logger.info("Loading models (this may take a few minutes)...")
-    model_manager = initialize_models(device_id=0)
+    # Initialize models (mode from env, set by run_server.py --mode flag)
+    mode = os.environ.get("MODEL_MODE", "both")
+    logger.info(f"Loading models (mode={mode}, this may take a few minutes)...")
+    model_manager = initialize_models(device_id=0, mode=mode)
     
     if not model_manager.is_loaded:
         logger.error("Failed to load models!")
@@ -179,6 +181,46 @@ async def get_config():
         valid_fps=VALID_FPS,
         valid_resolutions=[list(r) for r in VALID_RESOLUTIONS],
     )
+
+
+# =============================================================================
+# Admin Endpoints (for experiment orchestration)
+# =============================================================================
+
+@app.post("/admin/set-worker-url", tags=["Admin"])
+async def set_worker_url(request: dict):
+    """
+    Dynamically set the remote worker URL for distributed mode.
+
+    Called by the experiment orchestration script when a new worker pod starts.
+    Resets the worker status tracker so the coordinator will try the new worker.
+    """
+    worker_url = request.get("worker_url", "")
+    if not worker_url:
+        raise HTTPException(status_code=400, detail="worker_url is required")
+
+    # Update the distributed config
+    DISTRIBUTED.enabled = True
+    DISTRIBUTED.worker_url = worker_url
+
+    # Reset the generate_video singletons so they pick up the new URL
+    from .generator import generate_video
+    if hasattr(generate_video, "_worker_client"):
+        generate_video._worker_client.worker_url = worker_url.rstrip("/")
+    if hasattr(generate_video, "_worker_status"):
+        generate_video._worker_status.reset()
+
+    logger.info(f"Worker URL set to: {worker_url}")
+    return {"status": "ok", "worker_url": worker_url, "distributed_enabled": True}
+
+
+@app.post("/admin/disable-distributed", tags=["Admin"])
+async def disable_distributed():
+    """Disable distributed mode (fall back to local-only generation)."""
+    DISTRIBUTED.enabled = False
+    DISTRIBUTED.worker_url = ""
+    logger.info("Distributed mode disabled")
+    return {"status": "ok", "distributed_enabled": False}
 
 
 # =============================================================================

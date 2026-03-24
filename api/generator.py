@@ -105,35 +105,63 @@ def generate_video(
 ) -> GenerationResult:
     """
     Generate a video using the specified model configuration.
-    
-    This is the main generation function that supports:
-    - Baseline 14B: Use only 14B model
-    - Baseline 1.3B: Use only 1.3B model
-    - Hybrid: Switch between models based on schedule
-    
-    Args:
-        model_manager: ModelManager with loaded models
-        prompt: Text prompt for generation
-        model_type: Which model configuration to use
-        schedule: For hybrid mode, the sampling schedule
-        width, height: Video resolution
-        frame_count: Number of frames (must be 4n+1)
-        fps: Output FPS
-        sampling_steps: Diffusion sampling steps
-        guidance_scale: CFG scale
-        shift: Noise schedule shift
-        enable_caching: Whether to use simple activation caching
-        cache_start_step: Absolute step to start caching
-        cache_end_step: Absolute step to stop caching
-        cache_interval: Cache every N steps
-        seed: Random seed (-1 for random)
-        negative_prompt: Negative prompt
-        job_id: Job ID for output file naming
-        progress_callback: Called with progress updates
-    
-    Returns:
-        GenerationResult with video path and statistics
+
+    In distributed mode (DISTRIBUTED.enabled), delegates to the coordinator
+    which orchestrates across local 1.3B and remote 14B worker.
+    Otherwise, runs the original single-GPU pipeline.
     """
+    # Distributed mode dispatch
+    from .config import DISTRIBUTED
+    if DISTRIBUTED.enabled and DISTRIBUTED.worker_url:
+        from .distributed.coordinator import run_distributed_generation
+        from .distributed.worker_client import WorkerClient
+        from .distributed.worker_status import WorkerStatus
+        from .distributed.spot_manager import SpotManager
+        from .config import SPOT
+
+        # Use module-level singletons for client/status/spot across jobs
+        if not hasattr(generate_video, "_worker_client"):
+            generate_video._worker_client = WorkerClient(
+                worker_url=DISTRIBUTED.worker_url,
+                health_timeout=DISTRIBUTED.health_check_timeout,
+            )
+            generate_video._worker_status = WorkerStatus(
+                max_consecutive_failures=DISTRIBUTED.max_consecutive_failures,
+                backoff_duration=DISTRIBUTED.backoff_duration,
+            )
+            generate_video._spot_manager = SpotManager(
+                api_key=SPOT.api_key,
+                gpu_type=SPOT.gpu_type,
+                gpu_count=SPOT.gpu_count,
+                volume_id=SPOT.volume_id,
+                template_id=SPOT.template_id,
+                worker_port=SPOT.worker_port,
+                idle_timeout=SPOT.idle_timeout,
+                max_start_wait=SPOT.max_start_wait,
+            ) if SPOT.api_key else None
+
+        return run_distributed_generation(
+            model_manager=model_manager,
+            worker_client=generate_video._worker_client,
+            worker_status=generate_video._worker_status,
+            spot_manager=getattr(generate_video, "_spot_manager", None),
+            prompt=prompt,
+            model_type=model_type,
+            schedule=schedule,
+            width=width, height=height,
+            frame_count=frame_count, fps=fps,
+            sampling_steps=sampling_steps,
+            guidance_scale=guidance_scale, shift=shift,
+            enable_caching=enable_caching,
+            cache_start_step=cache_start_step,
+            cache_end_step=cache_end_step,
+            cache_interval=cache_interval,
+            seed=seed,
+            negative_prompt=negative_prompt,
+            job_id=job_id,
+            progress_callback=progress_callback,
+        )
+
     start_time = time.time()
     progress = GenerationProgress(
         total_steps=sampling_steps,
