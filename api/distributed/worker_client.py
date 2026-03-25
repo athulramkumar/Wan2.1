@@ -113,6 +113,34 @@ class WorkerClient:
         except Exception:
             return None
 
+    def run_segment_inline(
+        self,
+        checkpoint_data: bytes,
+        timeout: float = 600.0,
+    ) -> bytes:
+        """
+        Send checkpoint data to worker and get result back inline.
+
+        No shared filesystem needed. Transfers checkpoint over HTTP.
+        Returns result bytes or raises on failure.
+        """
+        try:
+            resp = self._session.post(
+                f"{self.worker_url}/run-segment-inline",
+                data=checkpoint_data,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                logger.info(f"Inline segment completed ({len(resp.content)/1e6:.1f}MB result)")
+                return resp.content
+            else:
+                logger.warning(f"Worker inline segment failed: {resp.status_code} {resp.text[:200]}")
+                raise RuntimeError(f"Worker returned {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Inline segment failed: {e}")
+            raise
+
     def wait_for_segment(
         self,
         task_id: str,

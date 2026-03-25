@@ -37,6 +37,7 @@ from api.distributed.checkpoint import (
     save_checkpoint,
     load_checkpoint,
     load_segment_result,
+    serialize_scheduler_state,
     restore_scheduler_state,
     get_checkpoint_paths,
     cleanup_job_checkpoints,
@@ -258,16 +259,14 @@ def run_distributed_generation(
             segment_timesteps = timesteps[step_idx : step_idx + num_steps]
 
             if model_name == "14B" and worker_status.should_try_worker:
-                # Try to delegate to worker
+                # Try to delegate to worker via inline HTTP transfer
                 success = False
 
                 # Health check
                 if worker_client.health_check():
-                    input_path, output_path = get_checkpoint_paths(
-                        checkpoint_dir, job_id, segment_idx
-                    )
+                    import io as _io
 
-                    # Save checkpoint for worker
+                    # Serialize checkpoint to bytes
                     sampling_params = {
                         "guidance_scale": guidance_scale,
                         "target_shape": target_shape,
@@ -275,59 +274,58 @@ def run_distributed_generation(
                         "seq_len": seq_len,
                         "shift": shift,
                     }
-                    save_checkpoint(
-                        path=input_path,
-                        job_id=job_id,
-                        segment_idx=segment_idx,
-                        global_step=step_idx,
-                        latents=latents,
-                        context=context,
-                        context_null=context_null,
-                        scheduler=scheduler,
-                        sampling_params=sampling_params,
-                        seed=actual_seed,
-                    )
+                    checkpoint_data = {
+                        "magic": "wan21_distributed_checkpoint",
+                        "version": 1,
+                        "job_id": job_id,
+                        "segment_idx": segment_idx,
+                        "global_step": step_idx,
+                        "latents": latents.cpu(),
+                        "context": [c.cpu() for c in context],
+                        "context_null": [c.cpu() for c in context_null],
+                        "scheduler_state": serialize_scheduler_state(scheduler),
+                        "sampling_params": sampling_params,
+                        "seed": actual_seed,
+                    }
+                    buf = _io.BytesIO()
+                    torch.save(checkpoint_data, buf)
+                    checkpoint_bytes = buf.getvalue()
+                    logger.info(f"Checkpoint serialized: {len(checkpoint_bytes)/1e6:.1f}MB")
 
-                    # Submit to worker
-                    task_id = worker_client.submit_segment(input_path, output_path)
-
-                    if task_id:
-                        # Wait for completion
+                    try:
+                        # Send checkpoint to worker, get result back inline
                         timeout = (
                             num_steps * DISTRIBUTED.expected_step_time_14b
                             + DISTRIBUTED.worker_timeout_margin
+                            + 30  # extra for transfer time
+                        )
+                        update_progress(step_idx, "14B (remote)")
+
+                        result_bytes = worker_client.run_segment_inline(
+                            checkpoint_bytes, timeout=timeout
                         )
 
-                        def worker_progress(cur, total):
-                            update_progress(step_idx + cur, f"14B (remote)")
-
-                        result = worker_client.wait_for_segment(
-                            task_id,
-                            timeout=timeout,
-                            progress_callback=worker_progress,
+                        # Deserialize result
+                        seg_result = torch.load(
+                            _io.BytesIO(result_bytes), map_location="cpu", weights_only=False
                         )
-
-                        if result and result.get("status") == "completed":
-                            # Load result from shared volume
-                            seg_result = load_segment_result(output_path, device)
-                            latents = seg_result["latents"]
-                            restore_scheduler_state(
-                                scheduler, seg_result["scheduler_state"], device
-                            )
-                            total_cache_hits += seg_result.get("cache_hits", 0)
-                            total_fresh_computes += seg_result.get("fresh_computes", 0)
-                            worker_status.record_success()
-                            segments_on_worker += 1
-                            success = True
-                            logger.info(
-                                f"Segment {segment_idx} completed on worker "
-                                f"({seg_result.get('segment_time', 0):.1f}s)"
-                            )
-                        else:
-                            worker_status.record_failure(
-                                f"Segment {segment_idx}: "
-                                + (result.get("error", "timeout") if result else "timeout")
-                            )
+                        latents = seg_result["latents"].to(device)
+                        restore_scheduler_state(
+                            scheduler, seg_result["scheduler_state"], device
+                        )
+                        total_cache_hits += seg_result.get("cache_hits", 0)
+                        total_fresh_computes += seg_result.get("fresh_computes", 0)
+                        worker_status.record_success()
+                        segments_on_worker += 1
+                        success = True
+                        logger.info(
+                            f"Segment {segment_idx} completed on worker "
+                            f"({seg_result.get('segment_time', 0):.1f}s)"
+                        )
+                    except Exception as e:
+                        worker_status.record_failure(
+                            f"Segment {segment_idx}: {str(e)[:100]}"
+                        )
                 else:
                     worker_status.record_failure("Health check failed")
 

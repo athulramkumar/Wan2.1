@@ -35,7 +35,7 @@ except ImportError:
 # =============================================================================
 # Configuration - CHANGE THIS TO YOUR SERVER URL
 # =============================================================================
-API_BASE_URL = "https://jvkiftqnv4abuo-8888.proxy.runpod.net"
+API_BASE_URL = "https://t6npgjjo8y0yf0-8888.proxy.runpod.net"
 # =============================================================================
 
 

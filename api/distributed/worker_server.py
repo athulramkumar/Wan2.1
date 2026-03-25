@@ -24,7 +24,9 @@ from typing import Optional
 
 import torch
 import torch.cuda.amp as amp
+import fastapi
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 # Add project root for imports
@@ -294,3 +296,108 @@ async def segment_status(task_id: str):
         if _state.current_task.task_id != task_id:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         return _state.current_task.model_copy()
+
+
+@app.post("/run-segment-inline")
+async def run_segment_inline(request: fastapi.Request):
+    """
+    Execute a segment synchronously with checkpoint data in the request body.
+
+    Accepts: binary checkpoint data (torch.save format)
+    Returns: binary segment result data (torch.save format)
+
+    This avoids the need for shared filesystem between coordinator and worker.
+    """
+    import io
+
+    with _state.lock:
+        if _state.current_task and _state.current_task.status == "running":
+            raise HTTPException(status_code=409, detail="Worker is busy")
+
+    body = await request.body()
+    logger.info(f"Received inline checkpoint ({len(body)/1e6:.1f}MB)")
+
+    try:
+        device = _state.model_manager.device
+        model = _state.model_manager.get_model("14B")
+
+        # Load checkpoint from bytes
+        checkpoint = torch.load(io.BytesIO(body), map_location="cpu", weights_only=False)
+
+        # Move tensors to device
+        latents = checkpoint["latents"].to(device)
+        context = [c.to(device) for c in checkpoint["context"]]
+        context_null = [c.to(device) for c in checkpoint["context_null"]]
+        params = checkpoint["sampling_params"]
+        guidance_scale = params["guidance_scale"]
+        seq_len = params.get("seq_len", 0)
+
+        # Recreate scheduler
+        scheduler = FlowUniPCMultistepScheduler(
+            num_train_timesteps=model.num_train_timesteps,
+            shift=1,
+            use_dynamic_shifting=False,
+        )
+        total_steps = checkpoint["scheduler_state"]["num_inference_steps"]
+        scheduler.set_timesteps(total_steps, device=device, shift=params.get("shift", 5.0))
+        restore_scheduler_state(scheduler, checkpoint["scheduler_state"], device)
+
+        global_step_start = checkpoint["global_step"]
+        num_steps = params["num_steps"]
+        timesteps = scheduler.timesteps
+        segment_timesteps = timesteps[global_step_start:global_step_start + num_steps]
+
+        arg_c = {"context": context, "seq_len": seq_len}
+        arg_null = {"context": context_null, "seq_len": seq_len}
+
+        @contextmanager
+        def noop_no_sync():
+            yield
+
+        model.model.to(device)
+        no_sync = getattr(model.model, "no_sync", noop_no_sync)
+
+        fresh_computes = 0
+        segment_start = time.time()
+
+        with amp.autocast(dtype=model.param_dtype), torch.no_grad(), no_sync():
+            for i, t in enumerate(segment_timesteps):
+                latent_model_input = [latents]
+                timestep = torch.stack([t])
+                noise_pred_cond = model.model(latent_model_input, t=timestep, **arg_c)[0]
+                noise_pred_uncond = model.model(latent_model_input, t=timestep, **arg_null)[0]
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                fresh_computes += 1
+                temp_x0 = scheduler.step(noise_pred.unsqueeze(0), t, latents.unsqueeze(0), return_dict=False)[0]
+                latents = temp_x0.squeeze(0)
+
+        segment_time = time.time() - segment_start
+        logger.info(f"Inline segment done: {num_steps} steps in {segment_time:.1f}s")
+
+        # Serialize result
+        from api.distributed.checkpoint import serialize_scheduler_state
+        result = {
+            "magic": "wan21_distributed_checkpoint",
+            "version": 1,
+            "type": "segment_result",
+            "latents": latents.cpu(),
+            "scheduler_state": serialize_scheduler_state(scheduler),
+            "global_step": global_step_start + num_steps,
+            "segment_idx": checkpoint["segment_idx"],
+            "cache_hits": 0,
+            "fresh_computes": fresh_computes,
+            "segment_time": segment_time,
+        }
+
+        buf = io.BytesIO()
+        torch.save(result, buf)
+        buf.seek(0)
+
+        from fastapi.responses import Response
+        return Response(content=buf.read(), media_type="application/octet-stream")
+
+    except Exception as e:
+        logger.error(f"Inline segment failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
