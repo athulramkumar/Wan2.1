@@ -80,13 +80,11 @@ def restore_scheduler_state(scheduler, state, device):
         scheduler.this_order = state["this_order"]
 
 
-def run_segment_remote(url: str, checkpoint_data: dict, timeout: float = 600) -> dict:
+def run_segment_remote(url: str, checkpoint_data: dict, timeout: float = 600, endpoint: str = "/run-segment-inline") -> dict:
     """Send checkpoint to a remote GPU, get result back."""
     buf = io.BytesIO()
     torch.save(checkpoint_data, buf)
     payload = buf.getvalue()
-
-    endpoint = "/run-segment-inline" if "/1888" in url and "9" in url[-1:] else "/run-steps-inline"
     print(f"    Sending {len(payload)/1e6:.1f}MB to {url}{endpoint}...", end="", flush=True)
     t0 = time.time()
 
@@ -131,7 +129,7 @@ def decode_latents(url: str, latents: Tensor, fps: int = 16) -> bytes:
 
 def run_experiment(
     name: str,
-    schedule: list,  # [("14B", 15, H100_URL), ("1.3B", 35, A40_URL)]
+    schedule: list,  # [("14B", 15, H100_URL, "/run-segment-inline"), ...]
     encode_url: str,
     decode_url: str,
     vid_file: str,
@@ -141,7 +139,7 @@ def run_experiment(
     """Run a single experiment with the local orchestrator."""
     print(f"\n{'='*60}")
     print(f"  {name}")
-    print(f"  Schedule: {[(m,s) for m,s,_ in schedule]}")
+    print(f"  Schedule: {[(m,s) for m,s,*_ in schedule]}")
     print(f"{'='*60}")
 
     t_start = time.time()
@@ -158,7 +156,7 @@ def run_experiment(
     # From configs: t2v_14B and t2v_1_3B both use z_dim=16? Let me use 16.
     # Actually from our earlier experiments: target_shape = (4, 21, 60, 104)
     # z_dim = 4 based on the checkpoint data we saw earlier
-    target_shape = (4, 21, 60, 104)
+    target_shape = (16, 21, 60, 104)  # z_dim=16 for Wan2.1 T2V
 
     seq_len = math.ceil((target_shape[2] * target_shape[3]) / (1 * 1) * target_shape[1])
     # patch_size for 14B is (1,2,2), for 1.3B is (1,2,2)
@@ -170,8 +168,15 @@ def run_experiment(
     latents = noise
 
     # Create scheduler on CPU
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+    # Import scheduler directly to avoid wan/__init__.py pulling in all deps
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "fm_solvers_unipc",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "wan", "utils", "fm_solvers_unipc.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    FlowUniPCMultistepScheduler = mod.FlowUniPCMultistepScheduler
 
     scheduler = FlowUniPCMultistepScheduler(
         num_train_timesteps=1000, shift=1, use_dynamic_shifting=False
@@ -183,7 +188,9 @@ def run_experiment(
     total_compute = 0
     total_transfer = 0
 
-    for model_name, num_steps, gpu_url in schedule:
+    for seg in schedule:
+        model_name, num_steps, gpu_url = seg[0], seg[1], seg[2]
+        seg_endpoint = seg[3] if len(seg) > 3 else "/run-segment-inline"
         print(f"\n  Segment: {model_name} x{num_steps} steps on {gpu_url}")
 
         checkpoint = {
@@ -208,7 +215,7 @@ def run_experiment(
         }
 
         t_transfer = time.time()
-        result = run_segment_remote(gpu_url, checkpoint, timeout=600)
+        result = run_segment_remote(gpu_url, checkpoint, timeout=600, endpoint=seg_endpoint)
         transfer_time = time.time() - t_transfer
         compute_time = result.get("segment_time", 0)
         total_compute += compute_time
@@ -234,7 +241,7 @@ def run_experiment(
         "generation_time": total_time,
         "compute_time": total_compute,
         "transfer_overhead": total_transfer,
-        "schedule": [(m, s) for m, s, _ in schedule],
+        "schedule": [(seg[0], seg[1]) for seg in schedule],
         "status": "completed",
         "video_path": str(vid_path),
     }
@@ -264,10 +271,14 @@ def main():
 
     results = []
 
+    # schedule format: (model_name, num_steps, gpu_url, endpoint)
+    # H100 worker uses /run-segment-inline
+    # 2xA40 coordinator uses /run-steps-inline
+
     # Exp 1: All 50 steps on H100 (14B) — baseline
     r = run_experiment(
         "14B Baseline (H100)",
-        [("14B", 50, H100_WORKER)],
+        [("14B", 50, H100_WORKER, "/run-segment-inline")],
         encode_url=A40_COORD, decode_url=A40_COORD,
         vid_file="local_exp1_14B_baseline.mp4",
     )
@@ -276,7 +287,7 @@ def main():
     # Exp 2: Hybrid 30/70 (H100 14B + 2xA40 1.3B)
     r = run_experiment(
         "Hybrid 30/70 (H100+2xA40)",
-        [("14B", 15, H100_WORKER), ("1.3B", 35, A40_COORD)],
+        [("14B", 15, H100_WORKER, "/run-segment-inline"), ("1.3B", 35, A40_COORD, "/run-steps-inline")],
         encode_url=A40_COORD, decode_url=A40_COORD,
         vid_file="local_exp2_hybrid_30_70.mp4",
     )
@@ -285,7 +296,7 @@ def main():
     # Exp 3: Hybrid 20/80 (H100 14B + 2xA40 1.3B)
     r = run_experiment(
         "Hybrid 20/80 (H100+2xA40)",
-        [("14B", 10, H100_WORKER), ("1.3B", 40, A40_COORD)],
+        [("14B", 10, H100_WORKER, "/run-segment-inline"), ("1.3B", 40, A40_COORD, "/run-steps-inline")],
         encode_url=A40_COORD, decode_url=A40_COORD,
         vid_file="local_exp3_hybrid_20_80.mp4",
     )
@@ -294,7 +305,7 @@ def main():
     # Exp 4: 1.3B only on 2xA40
     r = run_experiment(
         "1.3B Only (2xA40)",
-        [("1.3B", 50, A40_COORD)],
+        [("1.3B", 50, A40_COORD, "/run-steps-inline")],
         encode_url=A40_COORD, decode_url=A40_COORD,
         vid_file="local_exp4_1.3B_only.mp4",
     )
