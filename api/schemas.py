@@ -163,11 +163,15 @@ class JobSubmitResponse(BaseModel):
 
 
 class CacheStatistics(BaseModel):
-    """Cache statistics for a generation run."""
-    
-    cache_hits: int = Field(description="Number of steps using cache")
-    fresh_computes: int = Field(description="Number of steps computed fresh")
-    cache_hit_rate: float = Field(description="Cache hit rate (0.0-1.0)")
+    """Cache and distributed statistics for a generation run."""
+    model_config = {"extra": "allow"}
+
+    cache_hits: int = Field(default=0, description="Number of steps using cache")
+    fresh_computes: int = Field(default=0, description="Number of steps computed fresh")
+    cache_hit_rate: float = Field(default=0.0, description="Cache hit rate (0.0-1.0)")
+    # Distributed stats (optional)
+    segments_on_worker: Optional[int] = Field(default=None, description="Segments run on remote worker")
+    segments_fallback: Optional[int] = Field(default=None, description="Segments that fell back to local")
 
 
 class JobMetadata(BaseModel):
