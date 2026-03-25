@@ -20,7 +20,7 @@
 | 5 | 1.3B only | 2xA40 single GPU | ~403s | 8.1s | $0.16 | Video saved |
 | 6 | 14B (timing only) | 2xA40 USP | 723.5s | 14.47s | $0.28 | Timing only |
 | 7 | 14B (timing only) | H100 | 715.6s | 14.31s | $0.53 | Timing only |
-| 8 | 14B (FSDP) | 2xA40 both | 1260s | 25.2s | $0.49 | Video saved |
+| 8 | 14B (FSDP) | 2xA40 both | 1260s (Killed it super slow) | 25.2s | $0.49 | Video saved |
 | 9 | Hybrid 30/70 (USP, no transfer) | 2xA40 USP+single | 1005.1s | — | $0.39 | Video saved |
 | 10 | 1.3B only (native generate.py) | 2xA40 single GPU | 545s (incl load) | ~8.1s | $0.21 | Video saved |
 
