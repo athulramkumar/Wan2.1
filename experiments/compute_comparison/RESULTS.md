@@ -9,32 +9,48 @@
 
 ---
 
-## Results
+## Complete Experiment Results
 
-### Single-Machine Experiments
+| # | Config | GPU | Compute | Per-step | Cost/run | Status |
+|---|--------|-----|---------|----------|----------|--------|
+| 1 | **14B baseline** | H100 (real prompt) | **472.2s** | **9.4s** | **$0.35** | Video saved |
+| 2 | **Hybrid 30/70 local** | H100 (real prompt) | **222.1s** | — | **$0.17** | Video saved |
+| 3 | Hybrid 30/70 distributed | H100+2xA40 relay | 405.6s compute | — | ~$0.17+transfer | Video saved |
+| 4 | Hybrid 20/80 distributed | H100+2xA40 relay | 396.3s compute | — | ~$0.16+transfer | Video saved |
+| 5 | 1.3B only | 2xA40 single GPU | ~403s | 8.1s | $0.16 | Video saved |
+| 6 | 14B (timing only) | 2xA40 USP | 723.5s | 14.47s | $0.28 | Timing only |
+| 7 | 14B (timing only) | H100 | 715.6s | 14.31s | $0.53 | Timing only |
+| 8 | 14B (FSDP) | 2xA40 both | 1260s | 25.2s | $0.49 | Video saved |
+| 9 | Hybrid 30/70 (USP, no transfer) | 2xA40 USP+single | 1005.1s | — | $0.39 | Video saved |
+| 10 | 1.3B only (native generate.py) | 2xA40 single GPU | 545s (incl load) | ~8.1s | $0.21 | Video saved |
 
-| Experiment | GPU | Compute | Per-step | Cost/video | Video |
-|-----------|-----|---------|----------|-----------|-------|
-| **14B Baseline** | H100 | **472.2s** | **9.4s** | **$0.35** | Yes |
-| **Hybrid 30/70 (local)** | H100 | **222.1s** | — | **$0.17** | Yes |
-| 1.3B Only | 2xA40 single | ~403s | 8.1s | $0.16 | Yes |
-| 14B (FSDP) | 2xA40 both | 1260s | 25.2s | $0.49 | Yes |
-| 14B (USP, timing only) | 2xA40 both | 723.5s | 14.5s | $0.28 | No (random emb) |
+### Distributed Breakdown (MacBook relay, experiments 3-5)
 
-### Distributed Experiments (MacBook relay)
+| Experiment | 14B segment | 1.3B segment | Transfer overhead | Total wall time |
+|-----------|-------------|-------------- |-------------------|-----------------|
+| 14B via H100 (baseline) | 472.2s (50 steps) | — | 33.0s | 574.1s |
+| Hybrid 30/70 | 141.7s (15 steps) | 263.9s (35 steps) | 74.3s | 521.8s |
+| Hybrid 20/80 | 94.6s (10 steps) | 301.8s (40 steps) | 84.6s | 534.2s |
+| 1.3B only | — | 377.1s (50 steps) | 50.3s | 482.3s |
 
-| Experiment | GPUs | Compute | Transfer | Total | Cost/video |
-|-----------|------|---------|----------|-------|-----------|
-| **14B via H100** | H100 worker | 472.2s | 33.0s | 574.1s | $0.35 |
-| **Hybrid 30/70** | H100+2xA40 | 405.6s | 74.3s | 521.8s | ~$0.17 |
-| **Hybrid 20/80** | H100+2xA40 | 396.3s | 84.6s | 534.2s | ~$0.16 |
-| 1.3B only | 2xA40 | 377.1s | 50.3s | 482.3s | $0.16 |
+### 2xA40 USP Hybrid Breakdown (experiment 9)
 
-### Hybrid on 2xA40 (USP, no transfer)
+| Phase | Steps | Model | Time | Per-step |
+|-------|-------|-------|------|----------|
+| Phase 1 | 15 | 14B (USP, 2 GPUs, no VAE) | 592.9s | 39.5s |
+| Phase 2 | 35 | 1.3B (single GPU) | 397.0s | 11.3s |
+| VAE decode | — | — | 15.1s | — |
+| **Total** | **50** | — | **1005.1s** | — |
 
-| Experiment | Phase 1 (14B USP) | Phase 2 (1.3B) | VAE | Total | Cost |
-|-----------|-------------------|----------------|-----|-------|------|
-| **Hybrid 30/70** | 592.9s (39.5s/step x15) | 397.0s (11.3s/step x35) | 15.1s | **1005.1s** | **$0.39** |
+### Timing-only comparison: 14B on H100 vs 2xA40 USP (experiments 6-7)
+
+These used random embeddings (not real prompts) for apples-to-apples per-step timing:
+
+| GPU | 50 steps | Per-step | Cost/run |
+|-----|----------|----------|----------|
+| 2xA40 USP | 723.5s | 14.47s | $0.28 |
+| H100 | 715.6s | 14.31s | $0.53 |
+| **H100 is** | **1.01x faster** | | **1.90x more expensive** |
 
 ---
 
