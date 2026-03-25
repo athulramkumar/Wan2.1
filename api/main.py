@@ -9,6 +9,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
+import fastapi
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -181,6 +182,148 @@ async def get_config():
         valid_fps=VALID_FPS,
         valid_resolutions=[list(r) for r in VALID_RESOLUTIONS],
     )
+
+
+# =============================================================================
+# Compute Endpoints (for local-orchestrator experiments)
+# =============================================================================
+
+@app.post("/run-steps-inline", tags=["Compute"])
+async def run_steps_inline(request: fastapi.Request):
+    """
+    Run N denoising steps with the locally loaded model.
+    Accepts checkpoint as binary POST body, returns result as binary.
+    Used by the local MacBook orchestrator for the relay approach.
+    """
+    import io
+    import torch
+    import torch.cuda.amp as amp
+    from contextlib import contextmanager
+    from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+    from api.distributed.checkpoint import restore_scheduler_state, serialize_scheduler_state
+
+    body = await request.body()
+    model_manager = get_model_manager()
+    device = model_manager.device
+
+    checkpoint = torch.load(io.BytesIO(body), map_location="cpu", weights_only=False)
+
+    latents = checkpoint["latents"].to(device)
+    context = [c.to(device) for c in checkpoint["context"]]
+    context_null = [c.to(device) for c in checkpoint["context_null"]]
+    params = checkpoint["sampling_params"]
+    guidance_scale = params["guidance_scale"]
+    seq_len = params.get("seq_len", 0)
+    model_name = params.get("model_name", "1.3B")
+
+    model = model_manager.get_model(model_name)
+
+    scheduler = FlowUniPCMultistepScheduler(
+        num_train_timesteps=model.num_train_timesteps, shift=1, use_dynamic_shifting=False,
+    )
+    total_steps = checkpoint["scheduler_state"]["num_inference_steps"]
+    scheduler.set_timesteps(total_steps, device=device, shift=params.get("shift", 5.0))
+    restore_scheduler_state(scheduler, checkpoint["scheduler_state"], device)
+
+    global_step_start = checkpoint["global_step"]
+    num_steps = params["num_steps"]
+    segment_timesteps = scheduler.timesteps[global_step_start:global_step_start + num_steps]
+
+    arg_c = {"context": context, "seq_len": seq_len}
+    arg_null = {"context": context_null, "seq_len": seq_len}
+
+    @contextmanager
+    def noop():
+        yield
+
+    import time as _time
+    model.model.to(device)
+    no_sync = getattr(model.model, "no_sync", noop)
+    start = _time.time()
+
+    with amp.autocast(dtype=model.param_dtype), torch.no_grad(), no_sync():
+        for i, t in enumerate(segment_timesteps):
+            latent_model_input = [latents]
+            timestep = torch.stack([t])
+            noise_pred_cond = model.model(latent_model_input, t=timestep, **arg_c)[0]
+            noise_pred_uncond = model.model(latent_model_input, t=timestep, **arg_null)[0]
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            temp_x0 = scheduler.step(noise_pred.unsqueeze(0), t, latents.unsqueeze(0), return_dict=False)[0]
+            latents = temp_x0.squeeze(0)
+
+    segment_time = _time.time() - start
+
+    result = {
+        "magic": "wan21_distributed_checkpoint",
+        "version": 1,
+        "type": "segment_result",
+        "latents": latents.cpu(),
+        "scheduler_state": serialize_scheduler_state(scheduler),
+        "global_step": global_step_start + num_steps,
+        "segment_idx": checkpoint.get("segment_idx", 0),
+        "segment_time": segment_time,
+        "fresh_computes": num_steps,
+    }
+    buf = io.BytesIO()
+    torch.save(result, buf)
+    return fastapi.responses.Response(content=buf.getvalue(), media_type="application/octet-stream")
+
+
+@app.post("/encode-text", tags=["Compute"])
+async def encode_text(request: dict):
+    """Encode text with T5 and return embeddings as binary."""
+    import io
+    import torch
+
+    model_manager = get_model_manager()
+    device = model_manager.device
+    model = model_manager.get_model(list(model_manager.get_models().keys())[0])
+
+    prompt = request.get("prompt", "")
+    negative_prompt = request.get("negative_prompt", "")
+
+    model.text_encoder.model.to(device)
+    context = model.text_encoder([prompt], device)
+    context_null = model.text_encoder([negative_prompt], device)
+    model.text_encoder.model.cpu()
+    torch.cuda.empty_cache()
+
+    result = {"context": context, "context_null": context_null}
+    buf = io.BytesIO()
+    torch.save(result, buf)
+    return fastapi.responses.Response(content=buf.getvalue(), media_type="application/octet-stream")
+
+
+@app.post("/decode-latents", tags=["Compute"])
+async def decode_latents(request: fastapi.Request):
+    """Decode latents to video with VAE, return MP4."""
+    import io
+    import torch
+    import tempfile
+    from wan.utils.utils import cache_video
+
+    body = await request.body()
+    data = torch.load(io.BytesIO(body), map_location="cpu", weights_only=False)
+
+    model_manager = get_model_manager()
+    device = model_manager.device
+    model = model_manager.get_model(list(model_manager.get_models().keys())[0])
+
+    latents = data["latents"].to(device)
+    fps = data.get("fps", 16)
+
+    with torch.no_grad():
+        videos = model.vae.decode([latents])
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    cache_video(videos[0][None], save_file=tmp.name, fps=fps, nrow=1, normalize=True, value_range=(-1, 1))
+
+    with open(tmp.name, "rb") as f:
+        video_bytes = f.read()
+    import os
+    os.unlink(tmp.name)
+
+    return fastapi.responses.Response(content=video_bytes, media_type="video/mp4")
 
 
 # =============================================================================
